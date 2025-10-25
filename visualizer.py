@@ -72,7 +72,7 @@ def _compute_bounds(poly_rings, lines_lonlat):
 def _get_style(style, token):
     if token:
         return (style or "outdoors", token)
-    return ("open-street-map", None)
+    return ("carto-positron", None)
 
 
 # ---------- Public builder ----------
@@ -82,7 +82,7 @@ def build_all_in_one_overview(
     out_html: str = "out/missions_all_in_one_sidebyside.html",
     missions_summary_csv: str | None = None,
     mapbox_token: str | None = None,
-    map_style: str | None = None,
+    map_style: str | None = "carto-positron",
     line_width: float = 3.0,
     table_tint_alpha: float = 0.14,
 ):
@@ -281,12 +281,12 @@ def build_all_in_one_overview(
         ]
         if "Photos" in cols:
             base += [
-                rec.get("photos_visited", "–"),
-                rec.get("assets_visited", "–"),
+                rec.get("photos_visited", "-"),
+                rec.get("assets_visited", "-"),
             ]
         base += [
-            f"{rec['distance_ft']:.1f}" if isinstance(rec.get("distance_ft"), (int, float)) else "–",
-            f"{rec['distance_mi']:.2f}" if isinstance(rec.get("distance_mi"), (int, float)) else "–",
+            f"{rec['distance_ft']:.1f}" if isinstance(rec.get("distance_ft"), (int, float)) else "-",
+            f"{rec['distance_mi']:.2f}" if isinstance(rec.get("distance_mi"), (int, float)) else "-",
             f"{rec['pct_outside']}",
             rec["csv"],
         ]
