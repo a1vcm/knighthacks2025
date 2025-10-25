@@ -1,17 +1,21 @@
 # Main Library Imports
 import numpy as np
 import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 from shapely import wkt
+from shapely.geometry import Point, LineString
 from pathlib import Path
-import os
+import os, json
 
 # Custom Imports
 from data_metrics import display_data_metrics
 from tsp_solver import ortools_single_tsp, route_distance
-from predecessor_formatter import _detect_sentinel, get_waypoints_to_nav_map, expand_leg_csgraph, expand_route_csgraph, export_expanded_coords
+from predecessor_formatter import get_waypoints_to_nav_map, expand_route_csgraph, export_expanded_coords
 from heuristics import greedy_split_by_battery
+from visualizer import load_mission_polylines, percent_length_outside
 
 # Load all the data
 data = {}
@@ -28,7 +32,7 @@ with open(f"{data_dir}/polygon_lon_lat.wkt") as f:
   polygon_wkt = f.read().strip()
 
 # Display the data metrics: optional
-display_data_metrics(data)
+#display_data_metrics(data)
 
 # TSP solver
 D = data["distances"]
@@ -99,7 +103,7 @@ for k, mission in enumerate(missions):
     "csv": Path(csv_path).name
   })
 
-print(f"[Step4] Expanded & exported {len(missions)} missions to {out_dir}/")
+print(f"\n[Step4] Expanded & exported {len(missions)} missions to {out_dir}/")
 
 # Create a summary table of all the missions
 summary_df = pd.DataFrame(mission_metrics)
@@ -113,3 +117,64 @@ print(f"[Step4] Saved → {out_dir}/missions_summary.csv")
 total_ft = float(summary_df["distance_ft"].sum()) if len(summary_df) else 0.0
 print(f"[Step4] Total routing distance across missions: {total_ft:.1f} ft "
       f"({total_ft/5280.0:.2f} mi)")
+
+# Step 5 Process all the data into points for visualization
+depot = 0
+all_visited = set()
+for m in missions:
+  all_visited.update([x for x in m if x != depot])
+
+photo_targets = np.arange(0, D.shape[0], dtype=int)
+photo_targets = photo_targets[photo_targets != depot]
+missed = sorted(set(photo_targets) - all_visited)
+
+print("\n[Step5] Coverage Check")
+print(f"Visited: {len(all_visited)} / {len(photo_targets)}")
+print("Missed targets:", "NONE" if not missed else missed)
+
+# Recheck for any battery constraint errors
+cap_report = []
+violations = []
+for k, m in enumerate(missions):
+  dist_ft = route_distance(m, D)
+  valid = dist_ft <= CAP_FT + 1e-6
+  cap_report.append({
+    "mission": k,
+    "distance_ft": dist_ft,
+    "valid": valid,
+    "slack_ft": CAP_FT - dist_ft
+  })
+
+  if not valid:
+    violations.append((k, dist_ft))
+if violations:
+  print("[Step5] Battery violations found:", violations)
+else:
+  print("[Step5] All missions within cap!")
+
+mission_lines = []
+for k in range(len(missions)):
+  csv_file = f"{out_dir}/mission_{k:02d}.csv"
+  line = load_mission_polylines(csv_file)
+  mission_lines.append(line)
+gdf_lines = gpd.GeoDataFrame(geometry=mission_lines, crs="EPSG:4326")
+
+poly = wkt.loads(polygon_wkt)
+poly_gdf = gpd.GeoDataFrame({"name": ["flight_zone"], "geometry": [poly]}, crs="EPSG:4326")
+
+outside_pct = []
+for k, row in gdf_lines.iterrows():
+  pct = percent_length_outside(row.geometry, poly)
+  outside_pct.append(pct)
+
+
+viol_out = [(i, round(p, 4)) for i, p in enumerate(outside_pct) if p > 0.01]  # Tolerance
+if viol_out:
+    print("[Step5] Airspace violations (length % outside polygon):", viol_out)
+else:
+    print("[Step5] All mission polylines within polygon ✅")
+
+
+# 5.5 Export a missions GeoJSON
+gdf_lines.to_file(f"{out_dir}/missions.geojson", driver="GeoJSON")
+print(f"[Step5] GeoJSON saved → {out_dir}/missions.geojson")
