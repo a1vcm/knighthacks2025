@@ -3,8 +3,6 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
-from ortools.constraint_solver import routing_enums_pb2
-from ortools.constraint_solver import pywrapcp
 from shapely import wkt
 from shapely.geometry import Point, LineString
 from pathlib import Path
@@ -14,7 +12,7 @@ import os, json
 from data_metrics import display_data_metrics
 from tsp_solver import ortools_single_tsp, route_distance
 from predecessor_formatter import get_waypoints_to_nav_map, expand_route_csgraph, export_expanded_coords
-from heuristics import greedy_split_by_battery
+from heuristics import greedy_split_by_battery, solve_vrp_distance_cap
 from visualizer import build_all_in_one_overview, load_mission_polylines, percent_length_outside
 
 # Load all the data
@@ -77,7 +75,22 @@ out_dir = "out"
 os.makedirs(out_dir, exist_ok=True)
 
 # Split the missions (We can change the heuristics here)
-missions = greedy_split_by_battery(tsp_route, D, CAP_FT, depot=0)
+missions = solve_vrp_distance_cap(
+  D,
+  depot=0,
+  cap_ft=CAP_FT,
+  time_limit_s=60,
+  vehicle_upper_bound=None,
+  vehicle_fixed_cost=None,
+  force_visit=True,
+  slack_ratio=1.0,
+  meta="GLS",
+)
+
+used_nodes = sum(len(r) - 2 for r in missions)  # minus depot at start/end
+print(f"[VRP] Missions created: {len(missions)}, visited nodes: {used_nodes}/{D.shape[0]-1} (cap {CAP_FT:.1f} ft)")
+
+
 print(f"[Step4] Missions created: {len(missions)} (cap {CAP_FT:.1f} ft incl. buffer {SAFETY_BUFFER*100:.0f}%)\n")
 
 # Expand each mission using the expanded predecessors data
