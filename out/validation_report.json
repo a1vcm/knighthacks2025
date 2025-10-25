@@ -1,0 +1,26 @@
+{
+  "num_missions": 13,
+  "battery_ft": 37725.0,
+  "cap_ft_used_in_split": 35838.75,
+  "total_routing_distance_ft": 440091.4674878022,
+  "max_mission_ft": 35838.552976525054,
+  "min_mission_ft": 15670.46628670486,
+  "all_within_cap": true,
+  "coverage_ok": true,
+  "missed_targets": [],
+  "airspace_outside_pct_per_mission": [
+    20.205773,
+    39.099331,
+    2.225239,
+    3.777266,
+    3.400606,
+    4.391219,
+    11.774415,
+    0.0,
+    7.912313,
+    9.835491,
+    9.587356,
+    11.586665,
+    0.0
+  ]
+}
