@@ -4,48 +4,14 @@ import pandas as pd
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 from shapely import wkt
+from pathlib import Path
 import os
 
 # Custom Imports
+from data_metrics import display_data_metrics
 from tsp_solver import ortools_single_tsp, route_distance
-
-# Optional: quick map (will be skipped if geopandas/contextily not installed)
-def quick_map(coords, asset_idx, photo_idx, polygon_wkt, out_png="out/step1_overview.png"):
-    try:
-        import geopandas as gpd
-        import matplotlib.pyplot as plt
-        import contextily as cx
-        from shapely.geometry import Point
-    except Exception as e:
-        print(f"[map] Skipping map (missing deps): {e}")
-        return
-
-    poly = wkt.loads(polygon_wkt)
-    poly_gdf = gpd.GeoDataFrame({"name": ["flight_zone"], "geometry": [poly]}, crs="EPSG:4326").to_crs(epsg=3857)
-
-    all_points = gpd.GeoDataFrame(
-        {"idx": np.arange(len(coords))},
-        geometry=[Point(lon, lat) for lon, lat in coords],
-        crs="EPSG:4326",
-    ).to_crs(epsg=3857)
-
-    assets_gdf = all_points.iloc[asset_idx] if len(asset_idx) else all_points.iloc[[]]
-    photos_gdf = all_points.iloc[photo_idx] if len(photo_idx) else all_points.iloc[[]]
-
-    os.makedirs(os.path.dirname(out_png), exist_ok=True)
-    fig, ax = plt.subplots(figsize=(9, 9))
-    poly_gdf.boundary.plot(ax=ax, linewidth=1.2, alpha=0.9, label="Flight Zone")
-    try:
-        cx.add_basemap(ax, source=cx.providers.OpenStreetMap.Mapnik)
-    except Exception:
-        pass
-    if len(assets_gdf): assets_gdf.plot(ax=ax, markersize=6, alpha=0.7, label="Assets (ref)", color="gray")
-    if len(photos_gdf): photos_gdf.plot(ax=ax, markersize=8, alpha=0.9, label="Photo targets", color="tab:blue")
-    ax.set_title("Step 1: Flight Zone & Waypoints")
-    ax.legend(loc="best")
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=180)
-    print(f"[map] Saved quick-look map → {out_png}")
+from predecessor_formatter import _detect_sentinel, get_waypoints_to_nav_map, expand_leg_csgraph, expand_route_csgraph, export_expanded_coords
+from heuristics import greedy_split_by_battery
 
 # Load all the data
 data = {}
@@ -61,99 +27,14 @@ data["waypoints"] = np.load(f"{data_dir}/waypoint_indexes.npy")
 with open(f"{data_dir}/polygon_lon_lat.wkt") as f:
   polygon_wkt = f.read().strip()
 
-D = data["distances"]
-P = data["predecessors"]
-coords = data["points"]
-
-# Sanity Check
-N = D.shape[0]
-print("=== SHAPES ===")
-print("distance_matrix:", D.shape)
-print("predecessors:   ", P.shape)
-print("points (lon,lat):", coords.shape)
-if data["waypoints"] is not None:
-    print("waypoint_indexes:", data["waypoints"].shape)
-
-assert D.shape == (N, N), "Distance matrix must be square"
-assert P.shape[0] == N, "predecessors first dimension must match distance_matrix size"
-assert coords.shape[1] == 2, "points_lat_long must have shape (K, 2)"
-
-# Slice the arrays defensively
-def slice_to_indices(arr, N):
-   start = int(arr[0])
-   end = int(arr[-1])
-
-   if end <= start:
-      return np.array([], dtype=int), (start, end, 0)
-   raw = np.arange(start, end, dtype=int)
-   oob_mask = (raw < 0) | (raw >= N)
-   kept = raw[~oob_mask]
-   return kept, (start, end, int(oob_mask.sum()))
-
-asset_idx, asset_info = slice_to_indices(data["assets"], N)
-photo_idx, photo_info = slice_to_indices(data["photo"], N)
-
-asset_coords = coords[3544:4274]  # plot-only
-
-print("\n=== INDEX RANGES ===")
-print(f"Assets slice raw:  [{asset_info[0]}, {asset_info[1]})  -> kept {len(asset_idx)} (oob dropped: {asset_info[2]})")
-print(f"Photos slice raw:  [{photo_info[0]}, {photo_info[1]})  -> kept {len(photo_idx)} (oob dropped: {photo_info[2]})")
-
-# Directional Matrix Check
-
-sym_ok = np.allclose(D, D.T, atol=1e-6, rtol=1e-6)
-finite_ok = np.isfinite(D).all()
-nonneg_ok = (D >= 0).all()
-
-D_off = D.copy()
-np.fill_diagonal(D_off, np.inf)
-min_off = float(np.min(D_off))
-max_any = float(np.max(D))
-print(f"Min off-diag ft: {min_off:.3f}")
-print(f"Max any ft:     {max_any:.3f}")
-
-print("\n=== DISTANCE MATRIX CHECKS ===")
-print("Symmetric:      ", sym_ok)
-print("Finite values:  ", finite_ok)
-print("Non-negative:   ", nonneg_ok)
-print(f"Min off-diag ft: {min_off:.3f}")
-print(f"Max any ft:      {max_any:.3f}")
-
-
-# ---------- Small summary table ----------
-summary = pd.DataFrame(
-    {
-        "metric": [
-            "N (nodes)",
-            "# asset indices (kept)",
-            "# photo indices (kept)",
-            "D symmetric?",
-            "D finite?",
-            "D non-negative?",
-            "min off-diag (ft)",
-            "max (ft)",
-        ],
-        "value": [
-            N,
-            len(asset_idx),
-            len(photo_idx),
-            sym_ok,
-            finite_ok,
-            nonneg_ok,
-            f"{min_off:.3f}",
-            f"{max_any:.3f}",
-        ],
-    }
-)
-print("\n=== SUMMARY ===")
-print(summary.to_string(index=False))
-
-# ---------- Optional quick-look map ----------
-#quick_map(coords, asset_idx, photo_idx, polygon_wkt, out_png="out/step1_overview.png")
+# Display the data metrics: optional
+display_data_metrics(data)
 
 # TSP solver
 D = data["distances"]
+P = data["predecessors"]
 N = D.shape[0]
+coords = data["points"]
 
 # Targets: all photo waypoints except depot (0)
 photo_targets = np.arange(0, N, dtype=int)
@@ -169,3 +50,66 @@ dist_mi = dist_ft / 5280.0
 print(f"TSP route length: {len(tsp_route)} nodes")
 print(f"Total tour distance: {dist_ft:.1f} ft ({dist_mi:.2f} mi)")
 print(f"Route starts at {tsp_route[0]}, ends at {tsp_route[-1]}")
+
+# Step 3 (expand the predecessors.npy file)
+N_wp = D.shape[0]
+N_nav = P.shape[1]
+
+wp2nav = get_waypoints_to_nav_map(N_wp, N_nav, waypoints_mapping=None)
+
+expanded_nav = expand_route_csgraph(tsp_route, P, wp2nav)
+_ = export_expanded_coords(expanded_nav, coords, out_csv_path="out/tsp_expanded_path.csv")
+
+print(f"[Step3] Expanded nav-node path length: {len(expanded_nav)}")
+
+# Step 4 (Heuristics to optimize path)
+BATTERY_FT = 37725.0
+SAFETY_BUFFER = 0.95
+CAP_FT = BATTERY_FT * SAFETY_BUFFER
+
+out_dir = "out"
+os.makedirs(out_dir, exist_ok=True)
+
+# Split the missions (We can change the heuristics here)
+missions = greedy_split_by_battery(tsp_route, D, CAP_FT, depot=0)
+print(f"[Step4] Missions created: {len(missions)} (cap {CAP_FT:.1f} ft incl. buffer {SAFETY_BUFFER*100:.0f}%)\n")
+
+# Expand each mission using the expanded predecessors data
+wp2nav = get_waypoints_to_nav_map(D.shape[0], P.shape[1], waypoints_mapping=None)
+
+# Record the metrics of each mission
+mission_metrics = []
+for k, mission in enumerate(missions):
+  # Expand the nav-node path
+  expanded_nav = expand_route_csgraph(mission, P, wp2nav)
+
+  # Exporting settings
+  csv_path = f"{out_dir}/mission_{k:02d}.csv"
+  df = export_expanded_coords(expanded_nav, coords, out_csv_path=csv_path)
+
+  # Compute the abstract routing distance for the mission
+  dist_ft = route_distance(mission, D)
+  dist_mi = dist_ft/5280.0
+
+  mission_metrics.append({
+    "mission": k,
+    "num_waypoints": max(0, len(mission) - 2),
+    "distance_ft" : float(dist_ft),
+    "distance_mi" : float(dist_mi),
+    "csv": Path(csv_path).name
+  })
+
+print(f"[Step4] Expanded & exported {len(missions)} missions to {out_dir}/")
+
+# Create a summary table of all the missions
+summary_df = pd.DataFrame(mission_metrics)
+summary_df.to_csv(f"{out_dir}/missions_summary.csv", index=False)
+
+print("[Step4] Summary:")
+print(summary_df.head(min(10, len(summary_df))))
+print(f"[Step4] Saved → {out_dir}/missions_summary.csv")
+
+# Optional: quick overall stats
+total_ft = float(summary_df["distance_ft"].sum()) if len(summary_df) else 0.0
+print(f"[Step4] Total routing distance across missions: {total_ft:.1f} ft "
+      f"({total_ft/5280.0:.2f} mi)")
