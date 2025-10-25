@@ -24,6 +24,79 @@ def percent_length_outside(line: LineString, polygon) -> float:
 
 
 # ---------- Internals ----------
+def _load_asset_points(points_path, asset_slice_path, photo_slice_path, mode="auto"):
+    """
+    Returns (lons, lats, ids) for poles.
+    - mode="direct": use coords[asset_start:asset_end] directly.
+    - mode="centroid": compute centroids from 4 photo points per asset.
+    - mode="auto": try direct, else fallback to centroid.
+    """
+    pts = np.load(points_path)  # shape (K,2) [lon,lat]
+    K = pts.shape[0]
+
+    asset_lons = []
+    asset_lats = []
+    asset_ids  = []
+
+    # Read slices (they’re 2-length arrays: [start, end))
+    asset_start = asset_end = None
+    photo_start = photo_end = None
+    if asset_slice_path and os.path.exists(asset_slice_path):
+        sl = np.load(asset_slice_path)
+        asset_start, asset_end = int(sl[0]), int(sl[-1])
+    if photo_slice_path and os.path.exists(photo_slice_path):
+        sl = np.load(photo_slice_path)
+        photo_start, photo_end = int(sl[0]), int(sl[-1])
+
+    def _direct_ok():
+        return (asset_start is not None and asset_end is not None and
+                0 <= asset_start < asset_end <= K)
+
+    def _centroid_ok():
+        return (photo_start is not None and photo_end is not None and
+                0 <= photo_start < photo_end <= K and
+                ((photo_end - photo_start) % 4 == 0))
+
+    chosen = None
+    if mode == "direct" and _direct_ok():
+        chosen = "direct"
+    elif mode == "centroid" and _centroid_ok():
+        chosen = "centroid"
+    elif mode == "auto":
+        if _direct_ok():
+            chosen = "direct"
+        elif _centroid_ok():
+            chosen = "centroid"
+
+    if chosen == "direct":
+        # Just plot the asset coordinate points (fastest)
+        sl = pts[asset_start:asset_end]
+        asset_lons = sl[:, 0].tolist()
+        asset_lats = sl[:, 1].tolist()
+        asset_ids  = list(range(asset_end - asset_start))
+        return asset_lons, asset_lats, asset_ids
+
+    if chosen == "centroid":
+        # Each asset has 4 consecutive photo waypoints
+        groups = (photo_end - photo_start) // 4
+        # Guard against groups == 0
+        if groups <= 0:
+            return [], [], []
+        for g in range(groups):
+            idx0 = photo_start + 4*g
+            block = pts[idx0:idx0+4]  # shape (4,2)
+            if block.shape[0] == 4:
+                lon_mean = float(np.mean(block[:, 0]))
+                lat_mean = float(np.mean(block[:, 1]))
+                asset_lons.append(lon_mean)
+                asset_lats.append(lat_mean)
+                asset_ids.append(g)
+        return asset_lons, asset_lats, asset_ids
+
+    # No valid way to compute assets
+    return [], [], []
+
+
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     hex_color = hex_color.lstrip("#")
     r = int(hex_color[0:2], 16)
@@ -85,6 +158,14 @@ def build_all_in_one_overview(
     map_style: str | None = "carto-positron",
     line_width: float = 3.0,
     table_tint_alpha: float = 0.14,
+
+    points_lonlat_npy: str | None = None,     # e.g. "data/points_lat_long.npy"
+    asset_indexes_npy: str | None = None,     # e.g. "data/asset_indexes.npy"
+    photo_indexes_npy: str | None = None,     # e.g. "data/photo_indexes.npy"
+    show_assets: bool = True,
+    asset_mode: str = "auto",                 # "auto" | "direct" | "centroid"
+    asset_marker_size: int = 6,
+    asset_marker_color: str = "black",
 ):
     """
     Builds a single interactive HTML with:
@@ -110,6 +191,7 @@ def build_all_in_one_overview(
 
     missions = []
     lines_lonlat = []
+
     for name in sorted(os.listdir(missions_csv_dir)):
         if not (name.startswith("mission_") and name.endswith(".csv")):
             continue
@@ -137,7 +219,6 @@ def build_all_in_one_overview(
                     rec["distance_ft"] = float(row.iloc[0]["distance_ft"])
                 if not pd.isna(row.iloc[0].get("distance_mi", np.nan)):
                     rec["distance_mi"] = float(row.iloc[0]["distance_mi"])
-                # If you later add photos_visited/assets_visited, surface them here:
                 if "photos_visited" in row.columns and not pd.isna(row.iloc[0].get("photos_visited", np.nan)):
                     rec["photos_visited"] = int(row.iloc[0]["photos_visited"])
                 if "assets_visited" in row.columns and not pd.isna(row.iloc[0].get("assets_visited", np.nan)):
@@ -192,17 +273,37 @@ def build_all_in_one_overview(
     ]
 
     # --- Shaded polygon (fill) + outline on map (Row1, Col1) ---
-    # (We still draw the polygon, even though we center on missions)
     with_fill = True
     for xs, ys in poly_rings:
         fig.add_trace(
             go.Scattermapbox(
                 lon=xs, lat=ys, mode="lines",
                 fill="toself" if with_fill else None,
-                fillcolor="rgba(0,128,0,0.12)" if with_fill else None,
-                line=dict(width=2, color="green"),
+                fillcolor="rgba(0,0,0,0.08)" if with_fill else None,  # subtler gray fill
+                line=dict(width=2, color="black"),
                 name="Flight Zone",
                 hoverinfo="skip",
+            ),
+            row=1, col=1
+        )
+
+    # --- (Optional) Load pole points and add as markers (after fig exists!) ---
+    asset_lons = asset_lats = asset_ids = []
+    if show_assets and points_lonlat_npy:
+        asset_lons, asset_lats, asset_ids = _load_asset_points(
+            points_lonlat_npy, asset_indexes_npy, photo_indexes_npy, mode=asset_mode
+        )
+
+    if show_assets and asset_lons and asset_lats:
+        fig.add_trace(
+            go.Scattermapbox(
+                lon=asset_lons,
+                lat=asset_lats,
+                mode="markers",
+                marker=dict(size=asset_marker_size, color=asset_marker_color),
+                name="Poles",
+                text=[f"Pole {i:04d}" for i in asset_ids],
+                hovertemplate="<b>%{text}</b><br>Lon %{lon:.6f}<br>Lat %{lat:.6f}<extra></extra>",
             ),
             row=1, col=1
         )
@@ -227,7 +328,7 @@ def build_all_in_one_overview(
                 line=dict(width=line_width, color=color),
                 name=f"Mission {rec['mission']:02d}",
                 hovertemplate=hover + "<extra></extra>",
-                uirevision="keep",   # preserve map state on redraws
+                uirevision="keep",
             ),
             row=1, col=1
         )
@@ -266,9 +367,7 @@ def build_all_in_one_overview(
         fig.update_yaxes(title_text="Distance (ft)", fixedrange=True, row=2, col=1)
 
     # --- Color-coded mission table (Row2, Col2) ---
-    # If you added photos_visited / assets_visited to missions_summary.csv, they’ll appear here automatically.
     cols = ["Mission", "# Waypoints", "Distance (ft)", "Distance (mi)", "% Outside", "File"]
-    # If available, prepend Photos/Poles columns:
     if any("photos_visited" in m for m in missions) or any("assets_visited" in m for m in missions):
         cols = ["Mission", "# Waypoints", "Photos", "Poles", "Distance (ft)", "Distance (mi)", "% Outside", "File"]
 
@@ -313,7 +412,7 @@ def build_all_in_one_overview(
     fig.update_layout(
         mapbox=dict(
             style=style,
-            accesstoken=mapbox_token,  # token may be None for "open-street-map"
+            accesstoken=token,  # <-- use token returned by _get_style
             center=dict(lon=lon_c, lat=lat_c),
             zoom=zoom,
         ),
@@ -336,12 +435,9 @@ def build_all_in_one_overview(
         include_plotlyjs="cdn",
         full_html=True,
         config={
-            "scrollZoom": True,  # wheel zoom on the map
+            "scrollZoom": True,
             "displaylogo": False,
-            # Explicit Mapbox buttons:
             "modeBarButtonsToAdd": ["zoomInMapbox", "zoomOutMapbox", "resetViewMapbox"],
-            # (Optional) If you want to remove 2D cartesian zoom buttons:
-            # "modeBarButtonsToRemove": ["zoomIn2d", "zoomOut2d"],
         },
     )
     print(f"[viz] Saved → {out_html}")

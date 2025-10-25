@@ -210,6 +210,14 @@ html_path = build_all_in_one_overview(
     missions_summary_csv=f"{out_dir}/missions_summary.csv",
     out_html=f"{out_dir}/missions_all_in_one_sidebyside.html",
     mapbox_token=MAPBOX_TOKEN,
-    map_style=None,  # e.g., "satellite-streets" if using Mapbox
+    map_style=None  ,  # e.g., "satellite-streets" if using Mapbox
     line_width=3.0,
+
+    points_lonlat_npy=f"{data_dir}/points_lat_long.npy",
+    asset_indexes_npy=f"{data_dir}/asset_indexes.npy",   # slice [start,end)
+    photo_indexes_npy=f"{data_dir}/photo_indexes.npy",   # slice [start,end)
+    show_assets=True,
+    asset_mode="auto",                            # try direct, else centroid-of-photos
+    asset_marker_size=6,
+    asset_marker_color="black",
 )
