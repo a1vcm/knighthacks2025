@@ -64,7 +64,7 @@ def expand_route_csgraph(route_wp, P: np.ndarray, wp2nav: np.ndarray) -> np.ndar
         return np.array([int(wp2nav[route_wp[0]])], dtype=int)
 
     out = []
-    for a, b in zip(route_wp[:-1], route_wp[1:]):  
+    for a, b in zip(route_wp[:-1], route_wp[1:]):
         leg = expand_leg_csgraph(a, b, P, wp2nav)
         if not out:
             out.extend(leg.tolist())

@@ -15,7 +15,7 @@ from data_metrics import display_data_metrics
 from tsp_solver import ortools_single_tsp, route_distance
 from predecessor_formatter import get_waypoints_to_nav_map, expand_route_csgraph, export_expanded_coords
 from heuristics import greedy_split_by_battery
-from visualizer import load_mission_polylines, percent_length_outside
+from visualizer import build_all_in_one_overview, load_mission_polylines, percent_length_outside
 
 # Load all the data
 data = {}
@@ -30,6 +30,8 @@ data["waypoints"] = np.load(f"{data_dir}/waypoint_indexes.npy")
 
 with open(f"{data_dir}/polygon_lon_lat.wkt") as f:
   polygon_wkt = f.read().strip()
+
+MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")  # or paste your token string
 
 # Display the data metrics: optional
 #display_data_metrics(data)
@@ -68,7 +70,7 @@ print(f"[Step3] Expanded nav-node path length: {len(expanded_nav)}")
 
 # Step 4 (Heuristics to optimize path)
 BATTERY_FT = 37725.0
-SAFETY_BUFFER = 0.95
+SAFETY_BUFFER = 0.99
 CAP_FT = BATTERY_FT * SAFETY_BUFFER
 
 out_dir = "out"
@@ -188,93 +190,13 @@ else:
 gdf_lines.to_file(f"{out_dir}/missions.geojson", driver="GeoJSON")
 print(f"[Step5] GeoJSON saved → {out_dir}/missions.geojson")
 
-
-# TEMP CODE
-# 5.6 Combined overview map
-try:
-    import contextily as cx
-except Exception:
-    cx = None
-
-# Ensure 'mission' column exists for color mapping
-if "mission" not in gdf_lines.columns:
-    gdf_lines["mission"] = np.arange(len(gdf_lines))
-
-lines_3857 = gdf_lines.to_crs(epsg=3857)
-poly_3857 = poly_gdf.to_crs(epsg=3857)
-
-fig, ax = plt.subplots(figsize=(10, 10))
-poly_3857.boundary.plot(ax=ax, linewidth=1.2, color="black", alpha=0.8, label="Flight Zone")
-
-# color by mission id
-lines_3857.plot(ax=ax, linewidth=2.0, alpha=0.9, column="mission", legend=False)
-
-if cx:
-    try:
-        cx.add_basemap(ax, source=cx.providers.OpenStreetMap.Mapnik)
-    except Exception:
-        pass
-
-ax.set_title("Inspection Missions — Expanded Paths")
-ax.set_axis_off()
-plt.tight_layout()
-fig.savefig(f"{out_dir}/missions_overview.png", dpi=180)
-print(f"[Step5] Overview map saved → {out_dir}/missions_overview.png")
-
-# 5.7 Save a concise validation report
-report = {
-    "num_missions": len(missions),
-    "battery_ft": float(BATTERY_FT),
-    "cap_ft_used_in_split": float(CAP_FT),
-    "total_routing_distance_ft": float(sum(x["distance_ft"] for x in cap_report)),
-    "max_mission_ft": float(max(x["distance_ft"] for x in cap_report)),
-    "min_mission_ft": float(min(x["distance_ft"] for x in cap_report)),
-    "all_within_cap": all(x["valid"] for x in cap_report),
-    "coverage_ok": len(missed) == 0,
-    "missed_targets": missed,
-    "airspace_outside_pct_per_mission": [float(round(p, 6)) for p in outside_pct],
-}
-with open(f"{out_dir}/validation_report.json", "w") as f:
-    json.dump(report, f, indent=2)
-print(f"[Step5] Validation report saved → {out_dir}/validation_report.json")
-
-# === STEP 5B: Per-mission visualization ===
-print("[Step5] Rendering per-mission maps…")
-
-# Reproject for basemap & consistent layout
-lines_3857 = gdf_lines.to_crs(epsg=3857)
-poly_3857 = poly_gdf.to_crs(epsg=3857)
-
-for idx, row in lines_3857.iterrows():
-    mission_id = row["mission"]
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_title(f"Mission {mission_id:02d}", fontsize=14)
-
-    # Draw airspace boundary
-    poly_3857.boundary.plot(ax=ax, linewidth=1.2, color="black", alpha=0.9)
-
-    # Draw mission path line
-    gpd.GeoSeries(row.geometry).plot(ax=ax,
-                                     linewidth=3.0,
-                                     alpha=0.9,
-                                     color="tab:blue")
-
-    # Try basemap
-    if cx:
-        try:
-            cx.add_basemap(ax, source=cx.providers.OpenStreetMap.Mapnik)
-        except Exception:
-            print(f"[warn] No basemap for mission {mission_id}")
-
-    ax.set_axis_off()
-    plt.tight_layout()
-
-    mission_png = f"{out_dir}/mission_{mission_id:02d}.png"
-    fig.savefig(mission_png, dpi=160)
-    plt.close(fig)  # <-- prevent memory leaks/errors for many missions
-
-    print(f" • Saved: {mission_png}")
-
-print("[Step5] Per-mission maps complete!")
-
+# 1) Interactive overview (all missions)
+html_path = build_all_in_one_overview(
+    polygon_wkt_path="data/polygon_lon_lat.wkt",
+    missions_csv_dir=out_dir,
+    missions_summary_csv=f"{out_dir}/missions_summary.csv",
+    out_html=f"{out_dir}/missions_all_in_one_sidebyside.html",
+    mapbox_token=MAPBOX_TOKEN,
+    map_style=None,  # e.g., "satellite-streets" if using Mapbox
+    line_width=3.0,
+)
