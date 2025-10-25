@@ -1,4 +1,4 @@
-# visualizer.py — Plotly single-HTML overview with legend + table
+# visualizer.py — Plotly single-HTML overview with legend + tables + bar chart
 import os
 import json
 import numpy as np
@@ -8,7 +8,8 @@ from shapely.geometry import Point, LineString, Polygon, MultiPolygon
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# ---------- Existing helpers you already had (keep them) ----------
+
+# ---------- Existing helpers (kept) ----------
 def load_mission_polylines(csv_file):
     df = pd.read_csv(csv_file)
     points = [Point(lon, lat) for lon, lat in zip(df["lon"], df["lat"])]
@@ -21,7 +22,8 @@ def percent_length_outside(line: LineString, polygon) -> float:
     inside_len = inside.length if not inside.is_empty else 0.0
     return max(0.0, 100.0 * (1.0 - inside_len / line.length))
 
-# ---------- New internals ----------
+
+# ---------- Internals ----------
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     hex_color = hex_color.lstrip("#")
     r = int(hex_color[0:2], 16)
@@ -72,7 +74,8 @@ def _get_style(style, token):
         return (style or "outdoors", token)
     return ("open-street-map", None)
 
-# ---------- Public: one HTML with map + table ----------
+
+# ---------- Public builder ----------
 def build_all_in_one_overview(
     polygon_wkt_path: str,
     missions_csv_dir: str,
@@ -83,9 +86,13 @@ def build_all_in_one_overview(
     line_width: float = 3.0,
     table_tint_alpha: float = 0.14,
 ):
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-
+    """
+    Builds a single interactive HTML with:
+      - Map (left): shaded flight polygon + all mission polylines (color-coded)
+      - Top-right table: aggregate metrics
+      - Bottom-left: mission distance bar chart (axes locked; scroll goes to map)
+      - Bottom-right: color-tinted mission table (colors match lines)
+    """
     # --- Polygon ---
     with open(polygon_wkt_path, "r") as f:
         poly = wkt.loads(f.read().strip())
@@ -130,6 +137,11 @@ def build_all_in_one_overview(
                     rec["distance_ft"] = float(row.iloc[0]["distance_ft"])
                 if not pd.isna(row.iloc[0].get("distance_mi", np.nan)):
                     rec["distance_mi"] = float(row.iloc[0]["distance_mi"])
+                # If you later add photos_visited/assets_visited, surface them here:
+                if "photos_visited" in row.columns and not pd.isna(row.iloc[0].get("photos_visited", np.nan)):
+                    rec["photos_visited"] = int(row.iloc[0]["photos_visited"])
+                if "assets_visited" in row.columns and not pd.isna(row.iloc[0].get("assets_visited", np.nan)):
+                    rec["assets_visited"] = int(row.iloc[0]["assets_visited"])
 
         missions.append(rec)
         lines_lonlat.append((xs, ys))
@@ -154,13 +166,16 @@ def build_all_in_one_overview(
 
     # --- Map view & style ---
     style, token = _get_style(map_style, mapbox_token)
-    bounds = _compute_bounds(poly_rings, lines_lonlat)
+
+    # Focus the initial view on the mission lines (tighter than polygon bounds)
+    bounds = _compute_bounds([], lines_lonlat)
     lon_c, lat_c, zoom = _center_zoom(bounds)
+    zoom = max(zoom + 1, 3)  # small bias to zoom tighter
 
     # --- Layout grid: 2 rows x 2 cols (map left 50%, tables right 50%, bar chart under map) ---
     fig = make_subplots(
         rows=2, cols=2,
-        column_widths=[0.50, 0.50],   # <-- 50/50 split
+        column_widths=[0.50, 0.50],   # 50/50 split
         specs=[
             [{"type": "mapbox"}, {"type": "table"}],
             [{"type": "xy"},      {"type": "table"}],   # bar chart left; mission table right
@@ -177,11 +192,14 @@ def build_all_in_one_overview(
     ]
 
     # --- Shaded polygon (fill) + outline on map (Row1, Col1) ---
+    # (We still draw the polygon, even though we center on missions)
+    with_fill = True
     for xs, ys in poly_rings:
         fig.add_trace(
             go.Scattermapbox(
                 lon=xs, lat=ys, mode="lines",
-                fill="toself", fillcolor="rgba(0,128,0,0.12)",
+                fill="toself" if with_fill else None,
+                fillcolor="rgba(0,128,0,0.12)" if with_fill else None,
                 line=dict(width=2, color="green"),
                 name="Flight Zone",
                 hoverinfo="skip",
@@ -193,11 +211,13 @@ def build_all_in_one_overview(
     for i, rec in enumerate(missions):
         color = palette[i % len(palette)]
         hover = f"<b>Mission {rec['mission']:02d}</b>"
-        if isinstance(rec["distance_ft"], (int, float)):
+        if isinstance(rec.get("distance_ft"), (int, float)):
             hover += f"<br>Distance: {rec['distance_ft']:.1f} ft"
-        if isinstance(rec["distance_mi"], (int, float)):
+        if isinstance(rec.get("distance_mi"), (int, float)):
             hover += f" ({rec['distance_mi']:.2f} mi)"
         hover += f"<br># Waypoints: {rec['num_waypoints']}"
+        if "photos_visited" in rec: hover += f"<br>Photos: {rec['photos_visited']}"
+        if "assets_visited" in rec: hover += f"<br>Poles: {rec['assets_visited']}"
         hover += f"<br>% Outside: {rec['pct_outside']}"
 
         fig.add_trace(
@@ -207,7 +227,7 @@ def build_all_in_one_overview(
                 line=dict(width=line_width, color=color),
                 name=f"Mission {rec['mission']:02d}",
                 hovertemplate=hover + "<extra></extra>",
-                uirevision="keep",   # preserve map state per redraw
+                uirevision="keep",   # preserve map state on redraws
             ),
             row=1, col=1
         )
@@ -219,17 +239,17 @@ def build_all_in_one_overview(
         go.Table(
             header=dict(values=metrics_cols, fill_color="#f0f0f0", align="left"),
             cells=dict(
-                values=[ [k for k,_ in metrics_vals], [v for _,v in metrics_vals] ],
+                values=[[k for k, _ in metrics_vals], [v for _, v in metrics_vals]],
                 align="left",
             ),
         ),
         row=1, col=2
     )
 
-    # --- Bar chart of distances (Row2, Col1). Disable zoom/pan so map keeps the scroll. ---
+    # --- Bar chart of distances (Row2, Col1). Lock axes so scroll goes to map. ---
     bar_x, bar_y, bar_colors = [], [], []
     for i, rec in enumerate(missions):
-        if isinstance(rec["distance_ft"], (int, float)):
+        if isinstance(rec.get("distance_ft"), (int, float)):
             bar_x.append(f"{rec['mission']:02d}")
             bar_y.append(rec["distance_ft"])
             bar_colors.append(palette[i % len(palette)])
@@ -242,32 +262,44 @@ def build_all_in_one_overview(
             ),
             row=2, col=1
         )
-        # Lock axes so scroll wheel doesn't zoom the bar chart
         fig.update_xaxes(fixedrange=True, row=2, col=1)
         fig.update_yaxes(title_text="Distance (ft)", fixedrange=True, row=2, col=1)
 
     # --- Color-coded mission table (Row2, Col2) ---
-    table_cols = ["Mission", "# Waypoints", "Distance (ft)", "Distance (mi)", "% Outside", "File"]
+    # If you added photos_visited / assets_visited to missions_summary.csv, they’ll appear here automatically.
+    cols = ["Mission", "# Waypoints", "Distance (ft)", "Distance (mi)", "% Outside", "File"]
+    # If available, prepend Photos/Poles columns:
+    if any("photos_visited" in m for m in missions) or any("assets_visited" in m for m in missions):
+        cols = ["Mission", "# Waypoints", "Photos", "Poles", "Distance (ft)", "Distance (mi)", "% Outside", "File"]
+
     rows = []
     row_colors = []
     for i, rec in enumerate(missions):
-        rows.append([
+        base = [
             f"{rec['mission']:02d}",
             rec["num_waypoints"],
-            f"{rec['distance_ft']:.1f}" if isinstance(rec["distance_ft"], (int,float)) else "–",
-            f"{rec['distance_mi']:.2f}" if isinstance(rec["distance_mi"], (int,float)) else "–",
+        ]
+        if "Photos" in cols:
+            base += [
+                rec.get("photos_visited", "–"),
+                rec.get("assets_visited", "–"),
+            ]
+        base += [
+            f"{rec['distance_ft']:.1f}" if isinstance(rec.get("distance_ft"), (int, float)) else "–",
+            f"{rec['distance_mi']:.2f}" if isinstance(rec.get("distance_mi"), (int, float)) else "–",
             f"{rec['pct_outside']}",
             rec["csv"],
-        ])
+        ]
+        rows.append(base)
         row_colors.append(_hex_to_rgba(palette[i % len(palette)], table_tint_alpha))
 
     if rows:
         nrows = len(rows)
-        ncols = len(table_cols)
+        ncols = len(cols)
         fill_matrix = [[row_colors[r]] * ncols for r in range(nrows)]
         fig.add_trace(
             go.Table(
-                header=dict(values=table_cols, align="left", fill_color="#f0f0f0"),
+                header=dict(values=cols, align="left", fill_color="#f0f0f0"),
                 cells=dict(
                     values=list(map(list, zip(*rows))),
                     align="left",
@@ -281,30 +313,36 @@ def build_all_in_one_overview(
     fig.update_layout(
         mapbox=dict(
             style=style,
-            accesstoken=token,
+            accesstoken=mapbox_token,  # token may be None for "open-street-map"
             center=dict(lon=lon_c, lat=lat_c),
             zoom=zoom,
         ),
-        margin=dict(l=10, r=10, t=50, b=10),
         title="Inspection Missions — Overview (Interactive)",
-        legend=dict(orientation="h", yanchor="bottom", y=0.005, x=0.01),
         hovermode="closest",
         uirevision="keep",
+        legend=dict(
+            orientation="h",
+            y=-0.12, x=0.0, xanchor="left", yanchor="top",
+            bgcolor="rgba(255,255,255,0.75)",
+            bordercolor="rgba(0,0,0,0.15)", borderwidth=1
+        ),
+        margin=dict(l=10, r=10, t=50, b=80),
     )
 
+    # --- Write HTML once with proper interaction config ---
+    os.makedirs(os.path.dirname(out_html), exist_ok=True)
     fig.write_html(
         out_html,
         include_plotlyjs="cdn",
         full_html=True,
         config={
-            "scrollZoom": True,          # ✅ enable map wheel zoom
+            "scrollZoom": True,  # wheel zoom on the map
             "displaylogo": False,
-            "modeBarButtonsToRemove": ["zoomIn2d","zoomOut2d"],
+            # Explicit Mapbox buttons:
+            "modeBarButtonsToAdd": ["zoomInMapbox", "zoomOutMapbox", "resetViewMapbox"],
+            # (Optional) If you want to remove 2D cartesian zoom buttons:
+            # "modeBarButtonsToRemove": ["zoomIn2d", "zoomOut2d"],
         },
     )
-
-
-    os.makedirs(os.path.dirname(out_html), exist_ok=True)
-    fig.write_html(out_html, include_plotlyjs="cdn", full_html=True)
     print(f"[viz] Saved → {out_html}")
     return out_html
