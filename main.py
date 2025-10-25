@@ -152,12 +152,21 @@ if violations:
 else:
   print("[Step5] All missions within cap!")
 
-mission_lines = []
+mission_ids = []
+mission_geoms = []
 for k in range(len(missions)):
-  csv_file = f"{out_dir}/mission_{k:02d}.csv"
-  line = load_mission_polylines(csv_file)
-  mission_lines.append(line)
-gdf_lines = gpd.GeoDataFrame(geometry=mission_lines, crs="EPSG:4326")
+    csv_file = f"{out_dir}/mission_{k:02d}.csv"
+    if not os.path.exists(csv_file):
+        print(f"[Step5][warn] Missing CSV for mission {k}: {csv_file}")
+        continue
+    line = load_mission_polylines(csv_file)
+    mission_ids.append(k)
+    mission_geoms.append(line)
+
+gdf_lines = gpd.GeoDataFrame(
+    {"mission": mission_ids, "geometry": mission_geoms},
+    crs="EPSG:4326"
+)
 
 poly = wkt.loads(polygon_wkt)
 poly_gdf = gpd.GeoDataFrame({"name": ["flight_zone"], "geometry": [poly]}, crs="EPSG:4326")
@@ -178,3 +187,94 @@ else:
 # 5.5 Export a missions GeoJSON
 gdf_lines.to_file(f"{out_dir}/missions.geojson", driver="GeoJSON")
 print(f"[Step5] GeoJSON saved → {out_dir}/missions.geojson")
+
+
+# TEMP CODE
+# 5.6 Combined overview map
+try:
+    import contextily as cx
+except Exception:
+    cx = None
+
+# Ensure 'mission' column exists for color mapping
+if "mission" not in gdf_lines.columns:
+    gdf_lines["mission"] = np.arange(len(gdf_lines))
+
+lines_3857 = gdf_lines.to_crs(epsg=3857)
+poly_3857 = poly_gdf.to_crs(epsg=3857)
+
+fig, ax = plt.subplots(figsize=(10, 10))
+poly_3857.boundary.plot(ax=ax, linewidth=1.2, color="black", alpha=0.8, label="Flight Zone")
+
+# color by mission id
+lines_3857.plot(ax=ax, linewidth=2.0, alpha=0.9, column="mission", legend=False)
+
+if cx:
+    try:
+        cx.add_basemap(ax, source=cx.providers.OpenStreetMap.Mapnik)
+    except Exception:
+        pass
+
+ax.set_title("Inspection Missions — Expanded Paths")
+ax.set_axis_off()
+plt.tight_layout()
+fig.savefig(f"{out_dir}/missions_overview.png", dpi=180)
+print(f"[Step5] Overview map saved → {out_dir}/missions_overview.png")
+
+# 5.7 Save a concise validation report
+report = {
+    "num_missions": len(missions),
+    "battery_ft": float(BATTERY_FT),
+    "cap_ft_used_in_split": float(CAP_FT),
+    "total_routing_distance_ft": float(sum(x["distance_ft"] for x in cap_report)),
+    "max_mission_ft": float(max(x["distance_ft"] for x in cap_report)),
+    "min_mission_ft": float(min(x["distance_ft"] for x in cap_report)),
+    "all_within_cap": all(x["valid"] for x in cap_report),
+    "coverage_ok": len(missed) == 0,
+    "missed_targets": missed,
+    "airspace_outside_pct_per_mission": [float(round(p, 6)) for p in outside_pct],
+}
+with open(f"{out_dir}/validation_report.json", "w") as f:
+    json.dump(report, f, indent=2)
+print(f"[Step5] Validation report saved → {out_dir}/validation_report.json")
+
+# === STEP 5B: Per-mission visualization ===
+print("[Step5] Rendering per-mission maps…")
+
+# Reproject for basemap & consistent layout
+lines_3857 = gdf_lines.to_crs(epsg=3857)
+poly_3857 = poly_gdf.to_crs(epsg=3857)
+
+for idx, row in lines_3857.iterrows():
+    mission_id = row["mission"]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_title(f"Mission {mission_id:02d}", fontsize=14)
+
+    # Draw airspace boundary
+    poly_3857.boundary.plot(ax=ax, linewidth=1.2, color="black", alpha=0.9)
+
+    # Draw mission path line
+    gpd.GeoSeries(row.geometry).plot(ax=ax,
+                                     linewidth=3.0,
+                                     alpha=0.9,
+                                     color="tab:blue")
+
+    # Try basemap
+    if cx:
+        try:
+            cx.add_basemap(ax, source=cx.providers.OpenStreetMap.Mapnik)
+        except Exception:
+            print(f"[warn] No basemap for mission {mission_id}")
+
+    ax.set_axis_off()
+    plt.tight_layout()
+
+    mission_png = f"{out_dir}/mission_{mission_id:02d}.png"
+    fig.savefig(mission_png, dpi=160)
+    plt.close(fig)  # <-- prevent memory leaks/errors for many missions
+
+    print(f" • Saved: {mission_png}")
+
+print("[Step5] Per-mission maps complete!")
+
