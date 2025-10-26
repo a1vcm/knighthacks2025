@@ -8,6 +8,8 @@ from shapely import wkt
 from shapely.geometry import Point, LineString, MultiPolygon
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from typing import Optional
+# from typing import Optional
 
 
 # ---------- Simple helpers ----------
@@ -146,15 +148,15 @@ def build_all_in_one_overview(
     polygon_wkt_path: str,
     missions_csv_dir: str,
     out_html: str = "out/missions_all_in_one_sidebyside.html",
-    missions_summary_csv: str | None = None,
-    schedule_csv: str | None = None,         # << keep passing the schedule file
-    mapbox_token: str | None = None,
-    map_style: str | None = None,            # None => default b/w
+    missions_summary_csv:  Optional[str] = None,
+    schedule_csv:  Optional[str] = None,         # << keep passing the schedule file
+    mapbox_token: Optional[str] = None,
+    map_style: Optional[str] = None,            # None => default b/w
     line_width: float = 3.0,
     table_tint_alpha: float = 0.14,
-    points_lonlat_npy: str | None = None,
-    asset_indexes_npy: str | None = None,
-    photo_indexes_npy: str | None = None,
+    points_lonlat_npy: Optional[str] = None,
+    asset_indexes_npy: Optional[str] = None,
+    photo_indexes_npy: Optional[str] = None,
     show_assets: bool = True,
     asset_mode: str = "auto",
     asset_marker_size: int = 6,
