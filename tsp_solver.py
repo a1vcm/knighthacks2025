@@ -1,5 +1,6 @@
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
+# Calculate the distance of a given route
 def route_distance(route, D):
     return float(sum(D[a, b] for a, b in zip(route[:-1], route[1:])))
 
@@ -8,8 +9,9 @@ def ortools_single_tsp(D, depot=0, time_limit_s=20):
     Solve a single-vehicle TSP over all nodes in D, starting/ending at `depot`.
     Returns a list of node indices [0, ..., 0].
     """
-    N = D.shape[0]
-    manager = pywrapcp.RoutingIndexManager(N, 1, depot)
+
+    N = D.shape[0]                                          # Number of distances
+    manager = pywrapcp.RoutingIndexManager(N, 1, depot)     # OR tools
     routing = pywrapcp.RoutingModel(manager)
 
     def dist_cb(i, j):
